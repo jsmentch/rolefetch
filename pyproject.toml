@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "career-scraper"
+version = "0.1.0"
+description = "CLI to fetch job listings from employer career sites (Apple-first, adapter-based)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.8,<1",
+]
+
+[project.scripts]
+career-scraper = "career_scraper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["career_scraper*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+# UP (pyupgrade) assumes newer Python than our 3.9 floor.
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

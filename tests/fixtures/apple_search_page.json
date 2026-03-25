@@ -1,0 +1,23 @@
+{
+  "totalRecords": 2,
+  "searchResults": [
+    {
+      "id": "PIPE-114438206",
+      "positionId": "114438206",
+      "postingTitle": "FR-Technical Specialist",
+      "jobSummary": "Summary line one.\nSummary line two.",
+      "postDateInGMT": "2025-02-18T14:49:20.237887131Z",
+      "locations": [
+        {
+          "city": "",
+          "countryName": "France",
+          "name": "France"
+        }
+      ],
+      "team": {
+        "teamName": "Apple Retail",
+        "teamID": "teamsAndSubTeams-APPST"
+      }
+    }
+  ]
+}
