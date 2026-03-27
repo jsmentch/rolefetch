@@ -11,7 +11,7 @@ from career_scraper.sources.apple import (
     apple_client,
     fetch_jobs_for_locations,
     fetch_postlocation_matches,
-    resolve_location_id,
+    resolve_location_slug,
 )
 
 
@@ -39,15 +39,15 @@ def _cmd_apple(args: argparse.Namespace) -> int:
     location_ids: list[str] = list(args.location_id or [])
     with apple_client(locale=args.locale, timeout=args.timeout) as client:
         if args.location_query:
-            lid = resolve_location_id(
+            slug = resolve_location_slug(
                 client,
                 location_query=args.location_query,
                 locale=args.locale,
                 pick_index=args.location_index,
             )
-            location_ids.append(lid)
+            location_ids.append(slug)
         if not location_ids:
-            location_ids = ["postLocation-USA"]
+            location_ids = ["united-states-USA"]
 
         try:
             jobs = fetch_jobs_for_locations(

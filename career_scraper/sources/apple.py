@@ -1,34 +1,103 @@
 from __future__ import annotations
 
+import json
+import re
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 import httpx
+import pycountry
 
 from career_scraper.models import Job
 
-SEARCH_URL = "https://jobs.apple.com/api/role/search"
 POSTLOCATION_URL = "https://jobs.apple.com/api/v1/refData/postlocation"
+
+_HYDRATION_RE = re.compile(
+    r'window\.__staticRouterHydrationData\s*=\s*JSON\.parse\("((?:\\.|[^"\\])*)"\)',
+    re.DOTALL,
+)
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+# Safety cap: malformed responses should never spin forever.
+_MAX_SEARCH_PAGES = 5000
 
 
 class AppleAPIError(RuntimeError):
-    """Raised when Apple's jobs API returns an unexpected or error response."""
+    """Raised when Apple's jobs site returns an unexpected or error response."""
 
 
-def _client_headers(locale: str) -> Dict[str, str]:
+def _html_headers(locale: str) -> Dict[str, str]:
+    lc = locale.lower().replace("_", "-")
+    return {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://jobs.apple.com/{lc}/search",
+    }
+
+
+def _api_headers(locale: str) -> Dict[str, str]:
     lc = locale.lower().replace("_", "-")
     return {
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
         "Origin": "https://jobs.apple.com",
         "Referer": f"https://jobs.apple.com/{lc}/search",
     }
+
+
+def parse_search_from_hydration_html(html: str) -> Dict[str, Any]:
+    """Return the `loaderData.search` object from the SSR hydration payload."""
+    m = _HYDRATION_RE.search(html)
+    if not m:
+        raise AppleAPIError(
+            "Could not find embedded search data in the HTML page. "
+            "Apple may have changed jobs.apple.com; open an issue with a saved HTML sample."
+        )
+    escaped = m.group(1)
+    inner_json = json.loads('"' + escaped + '"')
+    data = json.loads(inner_json)
+    loader = data.get("loaderData")
+    if not isinstance(loader, dict):
+        raise AppleAPIError("Hydration payload missing loaderData.")
+    search = loader.get("search")
+    if not isinstance(search, dict):
+        raise AppleAPIError("Hydration payload missing loaderData.search.")
+    return search
+
+
+def ref_record_to_location_slug(record: Dict[str, Any]) -> str:
+    """Build the `location=` query value used on the public search URL."""
+    name = record.get("name_en_US") or record.get("displayName") or record.get("name") or ""
+    code = record.get("code") or ""
+    name = str(name).strip()
+    code = str(code).strip()
+    if not name or not code:
+        raise AppleAPIError(f"Location record missing name or code: {record!r}")
+    kebab = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return f"{kebab}-{code}"
+
+
+def postlocation_id_to_slug(postlocation_id: str) -> str:
+    """Map e.g. postLocation-USA to united-states-USA using ISO 3166-1 alpha-3."""
+    m = re.match(r"^postLocation-([A-Za-z0-9]{3})$", postlocation_id.strip())
+    if not m:
+        raise AppleAPIError(
+            f"Unrecognized postLocation id {postlocation_id!r}; "
+            "expected form like postLocation-USA."
+        )
+    alpha3 = m.group(1).upper()
+    country = pycountry.countries.get(alpha_3=alpha3)
+    if country is None:
+        raise AppleAPIError(f"Unknown country code {alpha3!r} in {postlocation_id!r}.")
+    return ref_record_to_location_slug(
+        {"name_en_US": country.name, "code": alpha3}
+    )
 
 
 def fetch_postlocation_matches(
@@ -39,12 +108,15 @@ def fetch_postlocation_matches(
 ) -> List[Dict[str, Any]]:
     """Return candidate location objects from Apple's refdata endpoint (shape varies)."""
     params = {"input": input_query}
-    r = client.get(POSTLOCATION_URL, params=params)
+    r = client.get(POSTLOCATION_URL, params=params, headers=_api_headers(locale))
     _raise_for_apple_status(r)
     data = r.json()
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     if isinstance(data, dict):
+        res = data.get("res")
+        if isinstance(res, list):
+            return [x for x in res if isinstance(x, dict)]
         for key in ("results", "data", "locations", "postLocations"):
             inner = data.get(key)
             if isinstance(inner, list):
@@ -52,7 +124,7 @@ def fetch_postlocation_matches(
     return []
 
 
-def resolve_location_id(
+def resolve_location_slug(
     client: httpx.Client,
     *,
     location_query: str,
@@ -66,11 +138,7 @@ def resolve_location_id(
         raise AppleAPIError(
             f"Location pick index {pick_index} out of range (0..{len(matches) - 1})"
         )
-    chosen = matches[pick_index]
-    lid = chosen.get("id") or chosen.get("postLocationId") or chosen.get("locationId")
-    if not lid or not isinstance(lid, str):
-        raise AppleAPIError(f"Could not read location id from match: {chosen!r}")
-    return lid
+    return ref_record_to_location_slug(matches[pick_index])
 
 
 def normalize_apple_job(record: Dict[str, Any], *, locale: str, include_raw: bool) -> Job:
@@ -125,87 +193,141 @@ def normalize_apple_job(record: Dict[str, Any], *, locale: str, include_raw: boo
     )
 
 
+def _search_page_url(
+    locale: str,
+    *,
+    location_slug: str,
+    search_query: str,
+    page: int,
+) -> str:
+    lc = locale.lower().replace("_", "-")
+    params: List[tuple[str, str]] = [("location", location_slug)]
+    if search_query.strip():
+        params.append(("search", search_query.strip()))
+    if page > 1:
+        params.append(("page", str(page)))
+    return f"https://jobs.apple.com/{lc}/search?{urlencode(params)}"
+
+
 def fetch_jobs_for_locations(
     client: httpx.Client,
     *,
-    location_ids: list[str],
+    location_ids: List[str],
     query: str = "",
     locale: str = "en-us",
     page_delay_sec: float = 0.35,
     max_pages: Optional[int] = None,
     include_raw: bool = True,
 ) -> List[Job]:
-    """Paginate search until all records are retrieved or a page adds nothing / max_pages hit."""
+    """
+    Fetch jobs by walking the public search HTML (SSR hydration), paginated with ?page=.
+
+    ``location_ids`` may be either URL slugs (``united-states-USA``) or legacy ids
+    (``postLocation-USA``); the latter are converted with pycountry.
+    """
     if not location_ids:
-        raise AppleAPIError("At least one location id is required (e.g. postLocation-USA).")
+        raise AppleAPIError("At least one location is required.")
 
-    lc = locale.lower().replace("_", "-")
-    request_body: Dict[str, Any] = {
-        "query": query,
-        "locale": lc,
-        "filters": {"postingpostLocation": location_ids},
-        "page": 1,
-    }
+    slugs: List[str] = []
+    for loc in location_ids:
+        loc = loc.strip()
+        if loc.startswith("postLocation-"):
+            slugs.append(postlocation_id_to_slug(loc))
+        else:
+            slugs.append(loc)
 
-    collected: List[Dict[str, Any]] = []
-    expected_count: Optional[int] = None
-    page = 1
+    collected: Dict[str, Dict[str, Any]] = {}
+    for slug in slugs:
+        page = 1
+        total_records: Optional[int] = None
+        page_size_hint: Optional[int] = None
+        pages_needed: Optional[int] = None
 
-    while True:
-        if max_pages is not None and page > max_pages:
-            break
+        while True:
+            if page > _MAX_SEARCH_PAGES:
+                raise AppleAPIError(
+                    f"Stopped after {_MAX_SEARCH_PAGES} pages for location={slug!r} "
+                    "to avoid an infinite loop (unexpected response from Apple)."
+                )
+            if max_pages is not None and page > max_pages:
+                break
 
-        request_body["page"] = page
-        r = client.post(SEARCH_URL, json=request_body)
-        _raise_for_apple_status(r)
+            url = _search_page_url(locale, location_slug=slug, search_query=query, page=page)
+            r = client.get(url, headers=_html_headers(locale))
+            _raise_for_apple_status(r)
+            if "text/html" not in (r.headers.get("content-type") or "").lower():
+                raise AppleAPIError(
+                    f"Expected HTML from search page, got {r.headers.get('content-type')!r}."
+                )
 
-        try:
-            payload = r.json()
-        except ValueError as e:
-            raise AppleAPIError(f"Search response was not JSON: {r.text[:500]!r}") from e
-
-        if not isinstance(payload, dict):
-            raise AppleAPIError(f"Unexpected search payload type: {type(payload).__name__}")
-
-        batch = payload.get("searchResults") or payload.get("results") or []
-        if not isinstance(batch, list):
-            raise AppleAPIError("searchResults is not a list")
-
-        tr = payload.get("totalRecords")
-        if tr is not None:
             try:
-                expected_count = int(tr)
-            except (TypeError, ValueError):
-                pass
+                search = parse_search_from_hydration_html(r.text)
+            except (json.JSONDecodeError, AppleAPIError) as e:
+                raise AppleAPIError(
+                    f"Failed to parse search data from {url}: {e}"
+                ) from e
 
-        before = len(collected)
-        for item in batch:
-            if isinstance(item, dict):
-                collected.append(item)
+            batch = search.get("searchResults") or []
+            if not isinstance(batch, list):
+                raise AppleAPIError("searchResults is not a list in hydration data.")
 
-        if len(collected) == before:
-            break
-        if expected_count is not None and len(collected) >= expected_count:
-            break
+            if not batch:
+                break
 
-        page += 1
-        time.sleep(page_delay_sec)
+            if page == 1:
+                tr = search.get("totalRecords")
+                if tr is not None:
+                    try:
+                        total_records = int(tr)
+                    except (TypeError, ValueError):
+                        total_records = None
+                if len(batch) > 0:
+                    page_size_hint = len(batch)
+                    if (
+                        total_records is not None
+                        and total_records > 0
+                        and page_size_hint > 0
+                    ):
+                        pages_needed = (total_records + page_size_hint - 1) // page_size_hint
 
-    by_id: Dict[str, Dict[str, Any]] = {}
-    for item in collected:
-        key = str(item.get("id") or item.get("reqId") or item.get("positionId", ""))
-        if key and key not in by_id:
-            by_id[key] = item
+            before = len(collected)
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("id") or item.get("reqId") or item.get("positionId", ""))
+                if key:
+                    collected.setdefault(key, item)
+
+            if len(collected) == before:
+                break
+
+            if (
+                pages_needed is not None
+                and max_pages is None
+                and page >= pages_needed
+            ):
+                break
+
+            page += 1
+            time.sleep(page_delay_sec)
 
     return [
-        normalize_apple_job(rec, locale=locale, include_raw=include_raw) for rec in by_id.values()
+        normalize_apple_job(rec, locale=locale, include_raw=include_raw)
+        for rec in collected.values()
     ]
 
 
 def apple_client(*, locale: str = "en-us", timeout: float = 30.0) -> httpx.Client:
+    t = httpx.Timeout(
+        timeout,
+        connect=min(15.0, float(timeout)),
+        read=float(timeout),
+        write=min(30.0, float(timeout)),
+        pool=min(15.0, float(timeout)),
+    )
     return httpx.Client(
-        headers=_client_headers(locale),
-        timeout=timeout,
+        headers=_html_headers(locale),
+        timeout=t,
         follow_redirects=True,
     )
 
