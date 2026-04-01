@@ -1,6 +1,6 @@
 # career-scraper
 
-Python CLI to download job postings from employer career sites in **JSONL** or **CSV** for local filtering and parsing. Supported sources include **Apple** (`jobs.apple.com`) and **Amazon** (`amazon.jobs`).
+Python CLI to download job postings from employer career sites in **JSONL** or **CSV** for local filtering and parsing. Supported sources include **Apple** (`jobs.apple.com`), **Amazon** (`amazon.jobs`), and **Google** (`google.com/about/careers`).
 
 ## Install
 
@@ -46,6 +46,11 @@ python -m career_scraper amazon --loc-query "United States" -v --max-pages 2
 
 # Full Amazon pull for a location (default out: data/raw/amazon/YYYY-MM-DD/…)
 python -m career_scraper amazon --loc-query "United States" --query "software engineer"
+
+# Google Careers (parses large HTML results pages; use --max-pages while testing)
+python -m career_scraper google --location "United States" -v --max-pages 2
+
+python -m career_scraper google --location "United States" --query "engineer"
 ```
 
 ### Output path convention
@@ -71,6 +76,10 @@ Amazon defaults look like:
 
 `data/raw/amazon/YYYY-MM-DD/amazon_<loc-query-or-query-or-all>_all.jsonl`
 
+Google defaults look like:
+
+`data/raw/google/YYYY-MM-DD/google_<location-or-query-or-all>_all.jsonl`
+
 ### Apple note
 
 Apple does not document a stable public API for bulk job export. Job listings are read from the **same HTML search pages** your browser loads (`/{locale}/search?...`), by parsing the embedded `__staticRouterHydrationData` payload. Location hints use `GET /api/v1/refData/postlocation` when you pass `--location-query` or `--list-locations`. Those mechanisms **may change** at any time. Use modest request pacing (`--page-delay`); comply with [Apple’s site terms](https://www.apple.com/legal/internet-services/terms/site.html) and applicable law.
@@ -78,6 +87,10 @@ Apple does not document a stable public API for bulk job export. Job listings ar
 ### Amazon note
 
 The CLI calls `https://www.amazon.jobs/{locale}/search.json` with the same query parameters the web UI uses (`base_query`, `loc_query`, `offset`, `result_limit`, etc.). That endpoint is **not documented as a public API** for third parties, may change or rate-limit at any time, and is subject to [Amazon’s site terms](https://www.amazon.com/gp/help/customer/display.html?nodeId=508088). Use `--page-delay` and modest `result_limit` values; respect robots and applicable law.
+
+### Google note
+
+The CLI downloads `https://www.google.com/about/careers/applications/jobs/results` HTML (the same paginated view the site serves to browsers) and extracts job links from the markup. Pages can be **large** and slow compared with Amazon’s JSON; pagination stops when a page returns **no listings** or **no new job ids**. This is **not a supported public API**, markup may change without notice, and automation may be constrained by [Google’s Terms of Service](https://policies.google.com/terms) and [robots.txt](https://www.google.com/robots.txt). Prefer generous `--timeout`, sensible `--page-delay`, and `--max-pages` while experimenting.
 
 ### Meta / metacareers (out of scope)
 

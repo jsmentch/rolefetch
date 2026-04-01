@@ -23,6 +23,13 @@ from career_scraper.sources.apple import (
     fetch_postlocation_matches,
     resolve_location_slug,
 )
+from career_scraper.sources.google import (
+    GoogleCareersError,
+    google_client,
+)
+from career_scraper.sources.google import (
+    fetch_jobs as google_fetch_jobs,
+)
 
 
 def _default_amazon_out_path(*, loc_query: str, base_query: str, fmt: str) -> Path:
@@ -35,6 +42,18 @@ def _default_amazon_out_path(*, loc_query: str, base_query: str, fmt: str) -> Pa
         part = "all"
     ext = "csv" if fmt == "csv" else "jsonl"
     return Path(f"data/raw/amazon/{run_date}/amazon_{part}_all.{ext}")
+
+
+def _default_google_out_path(*, location: str, query: str, fmt: str) -> Path:
+    run_date = date.today().isoformat()
+    if location.strip():
+        part = re.sub(r"[^a-zA-Z0-9_.-]+", "_", location.strip())[:80]
+    elif query.strip():
+        part = re.sub(r"[^a-zA-Z0-9_.-]+", "_", query.strip())[:80]
+    else:
+        part = "all"
+    ext = "csv" if fmt == "csv" else "jsonl"
+    return Path(f"data/raw/google/{run_date}/google_{part}_all.{ext}")
 
 
 def _default_apple_out_path(location_ids: list[str], *, fmt: str) -> Path:
@@ -145,6 +164,46 @@ def _cmd_amazon(args: argparse.Namespace) -> int:
             )
         except AmazonAPIError as e:
             print(f"Amazon jobs error: {e}", file=sys.stderr)
+            return 1
+
+    if args.format == "csv":
+        write_csv(jobs, out_path)
+    else:
+        write_jsonl(jobs, out_path, include_raw=not args.no_raw)
+
+    if not args.quiet:
+        print(f"Wrote {len(jobs)} jobs to {out_path}", file=sys.stderr)
+    return 0
+
+
+def _cmd_google(args: argparse.Namespace) -> int:
+    out_path = (
+        Path(args.out)
+        if args.out
+        else _default_google_out_path(
+            location=args.location,
+            query=args.query,
+            fmt=args.format,
+        )
+    )
+    if args.verbose and not args.quiet:
+        print(f"Output path: {out_path}", file=sys.stderr)
+
+    progress_cb = (lambda m: print(m, file=sys.stderr)) if args.verbose else None
+
+    with google_client(timeout=args.timeout) as client:
+        try:
+            jobs = google_fetch_jobs(
+                client,
+                location=args.location,
+                query=args.query,
+                page_delay_sec=args.page_delay,
+                max_pages=args.max_pages,
+                include_raw=not args.no_raw,
+                progress=progress_cb,
+            )
+        except GoogleCareersError as e:
+            print(f"Google careers error: {e}", file=sys.stderr)
             return 1
 
     if args.format == "csv":
@@ -341,6 +400,80 @@ def _build_parser() -> argparse.ArgumentParser:
         help="HTTP timeout in seconds (default: 30).",
     )
     amazon.set_defaults(func=_cmd_amazon)
+
+    google = sub.add_parser(
+        "google",
+        help="Fetch listings from Google Careers (HTML results pages)",
+    )
+    google.add_argument(
+        "--location",
+        default="",
+        metavar="TEXT",
+        help=(
+            "Location filter passed to the site (e.g. \"United States\"). "
+            "Leave empty for unscoped search."
+        ),
+    )
+    google.add_argument(
+        "--query",
+        default="",
+        metavar="TEXT",
+        help="Keyword filter passed as q= (default: empty).",
+    )
+    google.add_argument(
+        "--out",
+        "-o",
+        metavar="PATH",
+        help=(
+            "Output file path. If omitted, writes under data/raw/google/YYYY-MM-DD/ "
+            "from --location, --query, or 'all' (see README)."
+        ),
+    )
+    google.add_argument(
+        "--format",
+        choices=("jsonl", "csv"),
+        default="jsonl",
+        help="Output format (default: jsonl).",
+    )
+    log_g = google.add_mutually_exclusive_group()
+    log_g.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print progress messages to stderr while fetching.",
+    )
+    log_g.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only print errors (no summary line).",
+    )
+    google.add_argument(
+        "--page-delay",
+        type=float,
+        default=0.5,
+        metavar="SEC",
+        help="Delay between paginated requests (default: 0.5).",
+    )
+    google.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Stop after N pages (for testing).",
+    )
+    google.add_argument(
+        "--no-raw",
+        action="store_true",
+        help="Omit raw listing payload from JSONL output.",
+    )
+    google.add_argument(
+        "--timeout",
+        type=float,
+        default=45.0,
+        help="HTTP timeout in seconds (default: 45).",
+    )
+    google.set_defaults(func=_cmd_google)
     return p
 
 
