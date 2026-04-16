@@ -1,6 +1,6 @@
 # rolefetch
 
-Python CLI to download job postings from employer career sites in **JSONL** or **CSV** for local filtering and parsing. Supported sources include **Apple** (`jobs.apple.com`), **Amazon** (`amazon.jobs`), and **Google** (`google.com/about/careers`).
+Python CLI to download job postings from employer career sites in **JSONL** or **CSV** for local filtering and parsing. Supported sources include **Apple** (`jobs.apple.com`), **Amazon** (`amazon.jobs`), **Google** (`google.com/about/careers`), and **Microsoft** (`apply.careers.microsoft.com`).
 
 ## Install
 
@@ -53,10 +53,18 @@ python -m rolefetch amazon --loc-query "United States" --compact -o amazon_us_co
 # Drop only the raw payload but keep full posting text in summary (often still large)
 python -m rolefetch amazon --loc-query "United States" --no-raw -o amazon_us.jsonl
 
+# Full posting in raw.description plus quals, without duplicate fields / location blobs
+python -m rolefetch amazon --loc-query "United States" --query "scientist" --slim-raw -v
+
 # Google Careers (parses large HTML results pages; use --max-pages while testing)
 python -m rolefetch google --location "United States" -v --max-pages 2
 
 python -m rolefetch google --location "United States" --query "engineer"
+
+# Microsoft (Eightfold pcsx/search JSON — 10 roles per page; use --max-pages while testing)
+python -m rolefetch microsoft --location "United States" -v --max-pages 2
+
+python -m rolefetch microsoft --location "United States" --query "data scientist" --sort-by date
 ```
 
 ### Output path convention
@@ -80,11 +88,15 @@ python -m rolefetch apple \
 
 Amazon defaults look like:
 
-`data/raw/amazon/YYYY-MM-DD/amazon_<loc-query-or-query-or-all>_all.jsonl`
+`data/raw/amazon/YYYY-MM-DD/amazon_<loc>__<query>_all.jsonl` when both `--loc-query` and `--query` are set (double underscore between segments), otherwise `amazon_<loc-or-query-or-all>_all.jsonl`.
 
 Google defaults look like:
 
-`data/raw/google/YYYY-MM-DD/google_<location-or-query-or-all>_all.jsonl`
+`data/raw/google/YYYY-MM-DD/google_<location>__<query>_all.jsonl` when both filters are set, otherwise `google_<location-or-query-or-all>_all.jsonl`.
+
+Microsoft defaults look like:
+
+`data/raw/microsoft/YYYY-MM-DD/microsoft_<location>__<query>_all.jsonl` when both `--location` and `--query` are set, otherwise `microsoft_<location-or-query-or-all>_all.jsonl`.
 
 ### Apple note
 
@@ -94,11 +106,15 @@ Apple does not document a stable public API for bulk job export. Job listings ar
 
 The CLI calls `https://www.amazon.jobs/{locale}/search.json` with the same query parameters the web UI uses (`base_query`, `loc_query`, `offset`, `result_limit`, etc.). That endpoint is **not documented as a public API** for third parties, may change or rate-limit at any time, and is subject to [Amazon’s site terms](https://www.amazon.com/gp/help/customer/display.html?nodeId=508088). Use `--page-delay` and modest `result_limit` values; respect robots and applicable law.
 
-By default each JSONL line includes a `raw` field with the full search payload for that job (duplicating title, locations, and often a long HTML `description`), which makes files huge. Use **`--no-raw`** to drop that copy, or **`--compact`** to drop `raw` and keep only Amazon’s short teaser in `summary` instead of the full posting HTML.
+By default each JSONL line includes a `raw` field with the full search payload for that job (duplicating title, locations, and often a long HTML `description`), which makes files huge. Use **`--no-raw`** to drop that copy, **`--slim-raw`** to keep only description, qualifications, categories, apply URL, and a few tags (no location JSON blobs or duplicate fields), or **`--compact`** to drop `raw` and keep only Amazon’s short teaser in `summary` instead of the full posting HTML.
 
 ### Google note
 
 The CLI downloads `https://www.google.com/about/careers/applications/jobs/results` HTML (the same paginated view the site serves to browsers) and extracts job links from the markup. Pages can be **large** and slow compared with Amazon’s JSON; pagination stops when a page returns **no listings** or **no new job ids**. This is **not a supported public API**, markup may change without notice, and automation may be constrained by [Google’s Terms of Service](https://policies.google.com/terms) and [robots.txt](https://www.google.com/robots.txt). Prefer generous `--timeout`, sensible `--page-delay`, and `--max-pages` while experimenting.
+
+### Microsoft note
+
+The CLI calls `https://apply.careers.microsoft.com/api/pcsx/search` with the same query parameters the **Eightfold**-powered careers UI uses (`domain`, `query`, `location`, `start`, optional `sort_by`). Results arrive in **pages of up to 10** positions; the client walks `start` until the reported `count` is reached or a page returns no rows. This endpoint is **not documented as a public API** for third parties, may change or rate-limit at any time, and is subject to [Microsoft’s Terms of Use](https://www.microsoft.com/en-us/legal/intellectualproperty/copyright/default.aspx) and the careers site’s rules. Use `--page-delay` and `--max-pages` while experimenting. Job descriptions are **not** included in search results (only listing fields such as title, department, locations, and timestamps), so `summary` is left empty unless you extend the tool to fetch per-job detail pages.
 
 ### Meta / metacareers (out of scope)
 

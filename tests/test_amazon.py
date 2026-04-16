@@ -34,6 +34,31 @@ def test_normalize_amazon_job_short_summary_only_ignores_long_description() -> N
     assert short.summary is None
 
 
+def test_normalize_amazon_job_slim_raw_keeps_description_not_location_blobs() -> None:
+    loc_blob = json.dumps({"location": "US, WA, Seattle", "buildingCodeList": ["SEA1"]})
+    record = {
+        "id": "x",
+        "title": "Applied Scientist",
+        "company_name": "Amazon",
+        "job_path": "/en/jobs/1/t",
+        "location": "US, WA, Seattle",
+        "locations": [loc_blob],
+        "description_short": "Teaser",
+        "description": "FULL_HTML",
+        "basic_qualifications": "Must know Python",
+        "team": {"label": "team-ml"},
+        "job_family": "Applied Science",
+        "job_category": "ML",
+    }
+    job = normalize_amazon_job(record, include_raw=True, slim_raw=True)
+    assert job.raw is not None
+    assert job.raw.get("description") == "FULL_HTML"
+    assert job.raw.get("basic_qualifications") == "Must know Python"
+    assert "locations" not in job.raw
+    assert "team" not in job.raw
+    assert "title" not in job.raw
+
+
 def test_normalize_amazon_job_team_dict_and_location_json_blob() -> None:
     loc_blob = json.dumps(
         {

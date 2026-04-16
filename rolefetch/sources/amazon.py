@@ -16,6 +16,23 @@ DEFAULT_USER_AGENT = (
 _MAX_RESULT_LIMIT = 100
 _MAX_OFFSET_PAGES = 5000
 
+# Subset of search.json fields kept when ``slim_raw`` is true (drops duplicate scalars,
+# team objects, and stringified location blobs; keeps full JD and quals).
+_AMAZON_SLIM_RAW_KEYS = (
+    "description",
+    "basic_qualifications",
+    "preferred_qualifications",
+    "job_category",
+    "job_family",
+    "job_schedule_type",
+    "business_category",
+    "primary_search_label",
+    "normalized_location",
+    "url_next_step",
+    "id_icims",
+    "optional_search_labels",
+)
+
 
 class AmazonAPIError(RuntimeError):
     """Raised when Amazon Jobs JSON search returns an error or unexpected payload."""
@@ -79,7 +96,12 @@ def _amazon_location_line(item: Any) -> Optional[str]:
             except json.JSONDecodeError:
                 return None
             if isinstance(obj, dict):
-                for key in ("location", "normalizedLocation", "locationNonStemming", "display_name"):
+                for key in (
+                    "location",
+                    "normalizedLocation",
+                    "locationNonStemming",
+                    "display_name",
+                ):
                     v = obj.get(key)
                     if isinstance(v, str) and v.strip():
                         return v.strip()
@@ -108,11 +130,26 @@ def _amazon_locations_list(record: Dict[str, Any]) -> List[str]:
     return deduped
 
 
+def _amazon_slim_raw(record: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key in _AMAZON_SLIM_RAW_KEYS:
+        val = record.get(key)
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        if isinstance(val, (list, dict)) and len(val) == 0:
+            continue
+        out[key] = val
+    return out
+
+
 def normalize_amazon_job(
     record: Dict[str, Any],
     *,
     include_raw: bool,
     short_summary_only: bool = False,
+    slim_raw: bool = False,
 ) -> Job:
     external_id = str(record.get("id") or record.get("job_path") or "")
     path = (record.get("job_path") or "").strip()
@@ -142,7 +179,12 @@ def normalize_amazon_job(
         record.get("job_family")
     )
 
-    raw = dict(record) if include_raw else None
+    if not include_raw:
+        raw = None
+    elif slim_raw:
+        raw = _amazon_slim_raw(record)
+    else:
+        raw = dict(record)
     return Job(
         source="amazon",
         external_id=external_id or path,
@@ -169,6 +211,7 @@ def fetch_jobs(
     max_pages: Optional[int] = None,
     include_raw: bool = True,
     short_summary_only: bool = False,
+    slim_raw: bool = False,
     progress: Optional[Callable[[str], None]] = None,
 ) -> List[Job]:
     """
@@ -269,6 +312,7 @@ def fetch_jobs(
             rec,
             include_raw=include_raw,
             short_summary_only=short_summary_only,
+            slim_raw=slim_raw,
         )
         for rec in collected_by_id.values()
     ]

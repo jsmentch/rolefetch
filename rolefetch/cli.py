@@ -30,30 +30,59 @@ from rolefetch.sources.google import (
 from rolefetch.sources.google import (
     fetch_jobs as google_fetch_jobs,
 )
+from rolefetch.sources.microsoft import (
+    MicrosoftCareersError,
+    microsoft_client,
+)
+from rolefetch.sources.microsoft import (
+    fetch_jobs as microsoft_fetch_jobs,
+)
+
+
+def _slug_default_path_segment(text: str, *, max_len: int = 60) -> str:
+    """Sanitize user text for use in default output filenames."""
+    s = re.sub(r"[^a-zA-Z0-9_.-]+", "_", text.strip()).strip("_")
+    return s[:max_len] if s else ""
+
+
+def _join_default_path_parts(*segments: str, single_max: int = 80, joined_max: int = 120) -> str:
+    """Build filename middle segment from location and/or query (both kept when present)."""
+    parts = [p for p in segments if p]
+    if not parts:
+        return "all"
+    if len(parts) == 1:
+        return parts[0][:single_max]
+    return "__".join(parts)[:joined_max]
 
 
 def _default_amazon_out_path(*, loc_query: str, base_query: str, fmt: str) -> Path:
     run_date = date.today().isoformat()
-    if loc_query.strip():
-        part = re.sub(r"[^a-zA-Z0-9_.-]+", "_", loc_query.strip())[:80]
-    elif base_query.strip():
-        part = re.sub(r"[^a-zA-Z0-9_.-]+", "_", base_query.strip())[:80]
-    else:
-        part = "all"
+    part = _join_default_path_parts(
+        _slug_default_path_segment(loc_query),
+        _slug_default_path_segment(base_query),
+    )
     ext = "csv" if fmt == "csv" else "jsonl"
     return Path(f"data/raw/amazon/{run_date}/amazon_{part}_all.{ext}")
 
 
 def _default_google_out_path(*, location: str, query: str, fmt: str) -> Path:
     run_date = date.today().isoformat()
-    if location.strip():
-        part = re.sub(r"[^a-zA-Z0-9_.-]+", "_", location.strip())[:80]
-    elif query.strip():
-        part = re.sub(r"[^a-zA-Z0-9_.-]+", "_", query.strip())[:80]
-    else:
-        part = "all"
+    part = _join_default_path_parts(
+        _slug_default_path_segment(location),
+        _slug_default_path_segment(query),
+    )
     ext = "csv" if fmt == "csv" else "jsonl"
     return Path(f"data/raw/google/{run_date}/google_{part}_all.{ext}")
+
+
+def _default_microsoft_out_path(*, location: str, query: str, fmt: str) -> Path:
+    run_date = date.today().isoformat()
+    part = _join_default_path_parts(
+        _slug_default_path_segment(location),
+        _slug_default_path_segment(query),
+    )
+    ext = "csv" if fmt == "csv" else "jsonl"
+    return Path(f"data/raw/microsoft/{run_date}/microsoft_{part}_all.{ext}")
 
 
 def _default_apple_out_path(location_ids: list[str], *, fmt: str) -> Path:
@@ -150,6 +179,7 @@ def _cmd_amazon(args: argparse.Namespace) -> int:
 
     compact = args.compact
     include_raw = not args.no_raw and not compact
+    slim_raw = bool(args.slim_raw) and include_raw
 
     with amazon_client(timeout=args.timeout) as client:
         try:
@@ -164,6 +194,7 @@ def _cmd_amazon(args: argparse.Namespace) -> int:
                 max_pages=args.max_pages,
                 include_raw=include_raw,
                 short_summary_only=compact,
+                slim_raw=slim_raw,
                 progress=progress_cb,
             )
         except AmazonAPIError as e:
@@ -208,6 +239,48 @@ def _cmd_google(args: argparse.Namespace) -> int:
             )
         except GoogleCareersError as e:
             print(f"Google careers error: {e}", file=sys.stderr)
+            return 1
+
+    if args.format == "csv":
+        write_csv(jobs, out_path)
+    else:
+        write_jsonl(jobs, out_path, include_raw=not args.no_raw)
+
+    if not args.quiet:
+        print(f"Wrote {len(jobs)} jobs to {out_path}", file=sys.stderr)
+    return 0
+
+
+def _cmd_microsoft(args: argparse.Namespace) -> int:
+    out_path = (
+        Path(args.out)
+        if args.out
+        else _default_microsoft_out_path(
+            location=args.location,
+            query=args.query,
+            fmt=args.format,
+        )
+    )
+    if args.verbose and not args.quiet:
+        print(f"Output path: {out_path}", file=sys.stderr)
+
+    progress_cb = (lambda m: print(m, file=sys.stderr)) if args.verbose else None
+
+    with microsoft_client(timeout=args.timeout) as client:
+        try:
+            jobs = microsoft_fetch_jobs(
+                client,
+                domain=args.domain,
+                query=args.query,
+                location=args.location,
+                sort_by=args.sort_by,
+                page_delay_sec=args.page_delay,
+                max_pages=args.max_pages,
+                include_raw=not args.no_raw,
+                progress=progress_cb,
+            )
+        except MicrosoftCareersError as e:
+            print(f"Microsoft careers error: {e}", file=sys.stderr)
             return 1
 
     if args.format == "csv":
@@ -356,7 +429,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "Output file path. If omitted, writes under data/raw/amazon/YYYY-MM-DD/ "
-            "from loc_query, query, or 'all' (see README)."
+            "using loc_query and --query in the filename when both are set (see README)."
         ),
     )
     amazon.add_argument(
@@ -396,6 +469,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-raw",
         action="store_true",
         help="Omit raw API payload from JSONL output.",
+    )
+    amazon.add_argument(
+        "--slim-raw",
+        action="store_true",
+        help=(
+            "Include raw, but only job text and useful tags (description, quals, category, "
+            "apply URL, etc.); omit duplicate scalars, team blobs, and locations JSON. "
+            "Ignored with --no-raw or --compact."
+        ),
     )
     amazon.add_argument(
         "--compact",
@@ -438,7 +520,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "Output file path. If omitted, writes under data/raw/google/YYYY-MM-DD/ "
-            "from --location, --query, or 'all' (see README)."
+            "using --location and --query in the filename when both are set (see README)."
         ),
     )
     google.add_argument(
@@ -486,6 +568,89 @@ def _build_parser() -> argparse.ArgumentParser:
         help="HTTP timeout in seconds (default: 45).",
     )
     google.set_defaults(func=_cmd_google)
+
+    ms = sub.add_parser(
+        "microsoft",
+        help="Fetch listings from apply.careers.microsoft.com (pcsx/search JSON)",
+    )
+    ms.add_argument(
+        "--domain",
+        default="microsoft.com",
+        metavar="DOMAIN",
+        help="Eightfold domain parameter (default: microsoft.com).",
+    )
+    ms.add_argument(
+        "--location",
+        default="",
+        metavar="TEXT",
+        help='Location filter (e.g. "United States"). Leave empty for all locations.',
+    )
+    ms.add_argument(
+        "--query",
+        default="",
+        metavar="TEXT",
+        help="Keyword search (default: empty).",
+    )
+    ms.add_argument(
+        "--sort-by",
+        default="",
+        metavar="VALUE",
+        help='Optional sort (e.g. "date" for newest first). Default: site default.',
+    )
+    ms.add_argument(
+        "--out",
+        "-o",
+        metavar="PATH",
+        help=(
+            "Output file path. If omitted, writes under data/raw/microsoft/YYYY-MM-DD/ "
+            "using --location and --query in the filename when set (see README)."
+        ),
+    )
+    ms.add_argument(
+        "--format",
+        choices=("jsonl", "csv"),
+        default="jsonl",
+        help="Output format (default: jsonl).",
+    )
+    log_ms = ms.add_mutually_exclusive_group()
+    log_ms.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print progress messages to stderr while fetching.",
+    )
+    log_ms.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only print errors (no summary line).",
+    )
+    ms.add_argument(
+        "--page-delay",
+        type=float,
+        default=0.35,
+        metavar="SEC",
+        help="Delay between paginated requests (default: 0.35).",
+    )
+    ms.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Stop after N pages (for testing).",
+    )
+    ms.add_argument(
+        "--no-raw",
+        action="store_true",
+        help="Omit raw listing payload from JSONL output.",
+    )
+    ms.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="HTTP timeout in seconds (default: 30).",
+    )
+    ms.set_defaults(func=_cmd_microsoft)
     return p
 
 
