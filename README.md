@@ -65,6 +65,9 @@ python -m rolefetch google --location "United States" --query "engineer"
 python -m rolefetch microsoft --location "United States" -v --max-pages 2
 
 python -m rolefetch microsoft --location "United States" --query "data scientist" --sort-by date
+
+# Full HTML job descriptions (one extra HTTP request per job after search; increase delays if you hit 429)
+python -m rolefetch microsoft --location "United States" --query "scientist" --fetch-details -v --detail-delay 0.5
 ```
 
 ### Output path convention
@@ -114,7 +117,9 @@ The CLI downloads `https://www.google.com/about/careers/applications/jobs/result
 
 ### Microsoft note
 
-The CLI calls `https://apply.careers.microsoft.com/api/pcsx/search` with the same query parameters the **Eightfold**-powered careers UI uses (`domain`, `query`, `location`, `start`, optional `sort_by`). Results arrive in **pages of up to 10** positions; the client walks `start` until the reported `count` is reached or a page returns no rows. This endpoint is **not documented as a public API** for third parties, may change or rate-limit at any time, and is subject to [Microsoft’s Terms of Use](https://www.microsoft.com/en-us/legal/intellectualproperty/copyright/default.aspx) and the careers site’s rules. Use `--page-delay` and `--max-pages` while experimenting. Job descriptions are **not** included in search results (only listing fields such as title, department, locations, and timestamps), so `summary` is left empty unless you extend the tool to fetch per-job detail pages.
+The CLI calls `https://apply.careers.microsoft.com/api/pcsx/search` with the same query parameters the **Eightfold**-powered careers UI uses (`domain`, `query`, `location`, `start`, optional `sort_by`). Results arrive in **pages of up to 10** positions; the client walks `start` until the reported `count` is reached or a page returns no rows. This endpoint is **not documented as a public API** for third parties, may change or rate-limit at any time, and is subject to [Microsoft’s Terms of Use](https://www.microsoft.com/en-us/legal/intellectualproperty/copyright/default.aspx) and the careers site’s rules. Use `--page-delay` and `--max-pages` while experimenting.
+
+Search responses **do not** include posting text. Pass **`--fetch-details`** to follow up with `GET /api/pcsx/position_details` once per job; the HTML **job description** is stored in **`summary`** and, when raw output is enabled, in **`raw.jobDescription`**. Detail calls are easy to rate-limit; prefer **`--detail-delay`** (or a larger **`--page-delay`**, which is reused as the default detail delay) between those requests.
 
 ### Meta / metacareers (out of scope)
 

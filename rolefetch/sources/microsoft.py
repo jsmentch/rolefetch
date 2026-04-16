@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urljoin
@@ -16,6 +17,7 @@ DEFAULT_USER_AGENT = (
 
 MICROSOFT_APPLY_BASE = "https://apply.careers.microsoft.com"
 SEARCH_URL = urljoin(MICROSOFT_APPLY_BASE, "/api/pcsx/search")
+POSITION_DETAILS_URL = urljoin(MICROSOFT_APPLY_BASE, "/api/pcsx/position_details")
 DEFAULT_DOMAIN = "microsoft.com"
 
 _MAX_SAFETY_PAGES = 5000
@@ -64,6 +66,83 @@ def _locations(record: Dict[str, Any]) -> List[str]:
     return []
 
 
+def _fetch_position_job_description_html(
+    client: httpx.Client,
+    *,
+    domain: str,
+    position_id: str,
+) -> Optional[str]:
+    """GET pcsx/position_details; returns ``jobDescription`` HTML or None if absent."""
+    r = client.get(
+        POSITION_DETAILS_URL,
+        params={"domain": domain, "position_id": position_id},
+        headers=_headers(),
+    )
+    _raise_microsoft_http(r)
+    try:
+        payload = r.json()
+    except ValueError as e:
+        raise MicrosoftCareersError(f"Non-JSON response: {r.text[:400]!r}") from e
+
+    if not isinstance(payload, dict):
+        raise MicrosoftCareersError(f"Expected JSON object, got {type(payload).__name__}.")
+
+    status = payload.get("status")
+    if status is not None and int(status) >= 400:
+        err = payload.get("error")
+        raise MicrosoftCareersError(f"position_details API status {status}: {err!r}")
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    jd = data.get("jobDescription")
+    if isinstance(jd, str) and jd.strip():
+        return jd
+    return None
+
+
+def _enrich_jobs_with_job_descriptions(
+    client: httpx.Client,
+    jobs: List[Job],
+    *,
+    domain: str,
+    include_raw: bool,
+    delay_sec: float,
+    progress: Optional[Callable[[str], None]] = None,
+) -> List[Job]:
+    """
+    One ``position_details`` request per job; sets ``summary`` to HTML JD.
+
+    When ``include_raw`` is true, also sets ``raw.jobDescription``.
+    """
+    out: List[Job] = []
+    n = len(jobs)
+    for i, job in enumerate(jobs):
+        if i > 0:
+            time.sleep(delay_sec)
+        jd_html = _fetch_position_job_description_html(
+            client, domain=domain, position_id=job.external_id
+        )
+        new_summary = jd_html.strip() if jd_html else None
+
+        if include_raw:
+            merged: Dict[str, Any] = dict(job.raw) if job.raw else {}
+            if new_summary:
+                merged["jobDescription"] = new_summary
+            out.append(replace(job, summary=new_summary, raw=merged))
+        else:
+            out.append(replace(job, summary=new_summary))
+
+        if progress is not None:
+            progress(
+                f"Microsoft JDs — {i + 1}/{n} id {job.external_id}"
+                + ("" if new_summary else " (no jobDescription in response)")
+            )
+
+    return out
+
+
 def normalize_microsoft_position(record: Dict[str, Any], *, include_raw: bool) -> Job:
     eid = str(record.get("id") or record.get("displayJobId") or "").strip()
     title = str(record.get("name") or "").strip() or "(no title)"
@@ -96,11 +175,17 @@ def fetch_jobs(
     page_delay_sec: float = 0.35,
     max_pages: Optional[int] = None,
     include_raw: bool = True,
+    fetch_details: bool = False,
+    detail_delay_sec: Optional[float] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> List[Job]:
     """
     Paginate ``/api/pcsx/search`` (Eightfold PCSX) using ``start`` offsets until a page
     returns no positions, or ``max_pages`` is reached.
+
+    When ``fetch_details`` is true, follows up with ``/api/pcsx/position_details`` once
+    per job to load HTML ``jobDescription`` into ``summary`` (and ``raw.jobDescription``
+    when ``include_raw`` is true).
 
     This endpoint is used by ``apply.careers.microsoft.com`` and is not documented as a
     public API; it may change without notice.
@@ -193,7 +278,19 @@ def fetch_jobs(
 
         time.sleep(page_delay_sec)
 
-    return list(collected.values())
+    jobs = list(collected.values())
+    if fetch_details and jobs:
+        d_delay = detail_delay_sec if detail_delay_sec is not None else page_delay_sec
+        jobs = _enrich_jobs_with_job_descriptions(
+            client,
+            jobs,
+            domain=dom,
+            include_raw=include_raw,
+            delay_sec=float(d_delay),
+            progress=progress,
+        )
+
+    return jobs
 
 
 def microsoft_client(*, timeout: float = 30.0) -> httpx.Client:

@@ -129,3 +129,131 @@ def test_http_429_raises() -> None:
             assert "429" in str(e)
         else:
             raise AssertionError("expected MicrosoftCareersError")
+
+
+def test_fetch_details_fills_summary_and_raw_job_description() -> None:
+    search = {
+        "status": 200,
+        "error": {"message": "", "body": ""},
+        "data": {
+            "positions": [
+                {"id": 100, "name": "A", "positionUrl": "/careers/job/100", "postedTs": 1},
+                {"id": 200, "name": "B", "positionUrl": "/careers/job/200", "postedTs": 2},
+            ],
+            "count": 2,
+            "filterDef": {},
+            "sortBy": None,
+            "appliedFilters": {},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        u = str(request.url)
+        if "position_details" in u:
+            pid = request.url.params.get("position_id")
+            return httpx.Response(
+                200,
+                json={
+                    "status": 200,
+                    "error": {"message": "", "body": ""},
+                    "data": {"jobDescription": f"<p>JD-{pid}</p>"},
+                },
+            )
+        return httpx.Response(200, json=search)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        jobs = fetch_jobs(
+            client,
+            page_delay_sec=0,
+            max_pages=1,
+            include_raw=True,
+            fetch_details=True,
+            detail_delay_sec=0,
+        )
+
+    by = {j.external_id: j for j in jobs}
+    assert by["100"].summary == "<p>JD-100</p>"
+    assert by["100"].raw is not None
+    assert by["100"].raw.get("jobDescription") == "<p>JD-100</p>"
+    assert by["200"].summary == "<p>JD-200</p>"
+
+
+def test_fetch_details_summary_only_when_no_raw() -> None:
+    search = {
+        "status": 200,
+        "error": {"message": "", "body": ""},
+        "data": {
+            "positions": [
+                {"id": 7, "name": "X", "positionUrl": "/careers/job/7", "postedTs": 1},
+            ],
+            "count": 1,
+            "filterDef": {},
+            "sortBy": None,
+            "appliedFilters": {},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "position_details" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "status": 200,
+                    "data": {"jobDescription": "<div>body</div>"},
+                    "error": {"message": "", "body": ""},
+                },
+            )
+        return httpx.Response(200, json=search)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        jobs = fetch_jobs(
+            client,
+            page_delay_sec=0,
+            max_pages=1,
+            include_raw=False,
+            fetch_details=True,
+            detail_delay_sec=0,
+        )
+
+    assert len(jobs) == 1
+    assert jobs[0].summary == "<div>body</div>"
+    assert jobs[0].raw is None
+
+
+def test_fetch_details_raises_on_position_details_api_error() -> None:
+    search = {
+        "status": 200,
+        "error": {"message": "", "body": ""},
+        "data": {
+            "positions": [
+                {"id": 1, "name": "X", "positionUrl": "/careers/job/1", "postedTs": 1},
+            ],
+            "count": 1,
+            "filterDef": {},
+            "sortBy": None,
+            "appliedFilters": {},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "position_details" in str(request.url):
+            return httpx.Response(200, json={"status": 503, "error": {"message": "no"}, "data": {}})
+        return httpx.Response(200, json=search)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        try:
+            fetch_jobs(
+                client,
+                page_delay_sec=0,
+                max_pages=1,
+                include_raw=False,
+                fetch_details=True,
+                detail_delay_sec=0,
+            )
+        except MicrosoftCareersError as e:
+            assert "503" in str(e) or "position_details" in str(e)
+        else:
+            raise AssertionError("expected MicrosoftCareersError")

@@ -277,6 +277,8 @@ def _cmd_microsoft(args: argparse.Namespace) -> int:
                 page_delay_sec=args.page_delay,
                 max_pages=args.max_pages,
                 include_raw=not args.no_raw,
+                fetch_details=args.fetch_details,
+                detail_delay_sec=args.detail_delay,
                 progress=progress_cb,
             )
         except MicrosoftCareersError as e:
@@ -630,7 +632,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.35,
         metavar="SEC",
-        help="Delay between paginated requests (default: 0.35).",
+        help=(
+            "Delay between search API pages (default: 0.35). Also the default pause "
+            "between per-job JD requests when using --fetch-details if --detail-delay is omitted."
+        ),
     )
     ms.add_argument(
         "--max-pages",
@@ -638,6 +643,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="Stop after N pages (for testing).",
+    )
+    ms.add_argument(
+        "--fetch-details",
+        action="store_true",
+        help=(
+            "After search, load each posting's HTML job description via /api/pcsx/position_details "
+            "(one request per job; sets summary and, with raw enabled, raw.jobDescription). "
+            "Use --page-delay or --detail-delay to reduce rate limiting."
+        ),
+    )
+    ms.add_argument(
+        "--detail-delay",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Delay between position_details calls (default: same as --page-delay).",
     )
     ms.add_argument(
         "--no-raw",
